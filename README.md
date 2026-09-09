@@ -182,8 +182,12 @@ Formats via `?format=`:
 - `apache`: `Require ip <cidr>` lines for an Apache `<RequireAny>` include
 - `json`: `{query, count, source, cidrs[]}`
 
-The index builds in a background thread at startup (requires
-`maxminddb >= 2.5`); `/cidr` answers `503 Retry-After` until ready, and the
-lookup endpoints are never blocked. IPv4 and IPv6 are both included;
-adjacent prefixes are collapsed. Consumers fetching ACL files should
-sanity-check the result (e.g. minimum line count) before deploying it.
+Nothing is indexed at startup. The first request for a country or ASN scans
+the database in a background thread (a few seconds; requires
+`maxminddb >= 2.5`) and answers `503 Retry-After` — retry, e.g.
+`curl --retry 10 --retry-delay 5 ...` — and the result is cached until the
+service restarts. Only the requested key's networks are kept, so memory
+stays flat and the lookup endpoints are never blocked. IPv4 and IPv6 are
+both included; adjacent prefixes are collapsed. Consumers fetching ACL
+files should sanity-check the result (e.g. minimum line count) before
+deploying it.

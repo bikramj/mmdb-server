@@ -7,6 +7,7 @@
 # Copyright (C) 2022-2025 Alexandre Dulaunoy
 
 import configparser
+import sys
 import threading
 import time
 from ipaddress import collapse_addresses, ip_address
@@ -121,83 +122,106 @@ class MyRawLookup:
         resp.append_header('X-IP', ips[0])
 
 class CIDRExport:
-    """Shared logic for the /cidr endpoints: an index of the loaded databases
-    (country -> networks, ASN -> networks) served as collapsed CIDR lists.
+    """Shared logic for the /cidr endpoints: the collapsed CIDR list of one
+    country or ASN, produced by scanning the database on demand.
 
-    The index is built once in a daemon thread at startup so the hot lookup
-    endpoints are never blocked; /cidr requests answer 503 until it is ready.
-    The daily database refresh restarts the service, which rebuilds the index.
+    Nothing is indexed at startup. The first request for a key starts a scan
+    in a daemon thread and answers 503 Retry-After; only that key's networks
+    are kept, so memory stays flat, and the result is cached for the life of
+    the process (the daily database refresh restarts the service). The hot
+    lookup endpoints are never blocked.
     """
 
-    index = {'ready': False, 'country': {}, 'asn': {}, 'source': ''}
-    collapsed = {}
+    results = {}  # (kind, key) -> (cidrs, source); empty cidrs = no networks
+    pending = set()
+    lock = threading.Lock()
+    scan_lock = threading.Lock()  # one scan at a time
+
+    @staticmethod
+    def record_key(record, kind):
+        if not isinstance(record, dict):
+            return None
+        country = record.get('country')
+        if kind == 'country':
+            if isinstance(country, dict):  # MaxMind GeoIP2 / GeoOpen format
+                return country.get('iso_code')
+            return country
+        asn = record.get('asn')  # ipinfo: 'AS577'
+        if asn is None:
+            asn = record.get('autonomous_system_number')  # MaxMind ASN database
+        if asn is None and isinstance(country, dict):
+            asn = country.get('AutonomousSystemNumber')  # GeoOpen-Country-ASN
+        if asn is None:
+            return None
+        asn = str(asn).upper()
+        return asn if asn.startswith('AS') else 'AS' + asn
 
     @classmethod
-    def build_index(cls):
-        country = {}
-        asn = {}
+    def collect(cls, kind, key):
+        networks = []
         source = ''
-        for mmdb in mmdbs:
-            try:
-                for network, record in mmdb['reader']:
-                    if not isinstance(record, dict):
+        for path, mmdb in zip(mmdb_files, mmdbs):
+            has_kind = False
+            # A separate mmap reader (C extension when available) leaves the
+            # in-memory readers serving lookups untouched.
+            with maxminddb.open_database(path, maxminddb.MODE_AUTO) as reader:
+                for network, record in reader:
+                    k = cls.record_key(record, kind)
+                    if k is None:
                         continue
-                    cc = record.get('country')
-                    if isinstance(cc, dict):  # MaxMind GeoIP2 format
-                        cc = cc.get('iso_code')
-                    if cc:
-                        country.setdefault(cc, []).append(network)
-                    a = record.get('asn')
-                    if a is None:  # MaxMind ASN database field name
-                        a = record.get('autonomous_system_number')
-                    if a is not None:
-                        a = str(a)
-                        if not a.startswith('AS'):
-                            a = 'AS' + a
-                        asn.setdefault(a, []).append(network)
-            except Exception:
-                continue
-            if country:
-                # first database with country data wins (list ipinfo first)
+                    has_kind = True
+                    if k == key:
+                        networks.append(network)
+            if has_kind:
+                # first database carrying this kind of data wins
                 source = f"{mmdb['db_source']} (build {mmdb['build_db']})"
                 break
-        cls.index['country'] = country
-        cls.index['asn'] = asn
-        cls.index['source'] = source
-        cls.index['ready'] = True
-
-    @classmethod
-    def cidrs_for(cls, kind, key):
-        cached = cls.collapsed.get((kind, key))
-        if cached is not None:
-            return cached
-        networks = cls.index[kind].get(key)
-        if not networks:
-            return None
         v4 = collapse_addresses(n for n in networks if n.version == 4)
         v6 = collapse_addresses(n for n in networks if n.version == 6)
-        cidrs = [str(n) for n in v4] + [str(n) for n in v6]
-        cls.collapsed[(kind, key)] = cidrs
-        return cidrs
+        return [str(n) for n in v4] + [str(n) for n in v6], source
+
+    @classmethod
+    def scan(cls, kind, key):
+        try:
+            with cls.scan_lock:
+                result = cls.collect(kind, key)
+            with cls.lock:
+                cls.results[(kind, key)] = result
+        except Exception as e:  # a failed scan is simply retried by the next request
+            print(f'CIDR scan for {kind} {key} failed: {e}', file=sys.stderr)
+        finally:
+            with cls.lock:
+                cls.pending.discard((kind, key))
+
+    @classmethod
+    def lookup(cls, kind, key):
+        """Cached (cidrs, source) for key, or None while its scan runs."""
+        with cls.lock:
+            cached = cls.results.get((kind, key))
+            if cached is None and (kind, key) not in cls.pending:
+                cls.pending.add((kind, key))
+                threading.Thread(target=cls.scan, args=(kind, key), daemon=True).start()
+            return cached
 
     def respond(self, req, resp, kind, key, label):
-        if not self.index['ready']:
+        found = self.lookup(kind, key)
+        if found is None:
             resp.status = falcon.HTTP_503
-            resp.append_header('Retry-After', '30')
-            resp.media = 'CIDR index is still building, retry shortly.'
+            resp.append_header('Retry-After', '5')
+            resp.media = f'Scanning the database for {label}, retry shortly.'
             return
-        cidrs = self.cidrs_for(kind, key)
-        if cidrs is None:
+        cidrs, source = found
+        if not cidrs:
             resp.status = falcon.HTTP_404
             resp.media = f'No networks found for {label}.'
             return
         fmt = req.get_param('format', default='plain').lower()
-        header = f"# {label} - {len(cidrs)} ranges - {self.index['source']}"
+        header = f"# {label} - {len(cidrs)} ranges - {source}"
         if fmt == 'json':
             resp.media = {
                 'query': label,
                 'count': len(cidrs),
-                'source': self.index['source'],
+                'source': source,
                 'cidrs': cidrs,
             }
         elif fmt == 'apache':
@@ -216,6 +240,11 @@ class CountryCIDR(CIDRExport):
         if len(cc) != 2 or not cc.isalpha():
             resp.status = falcon.HTTP_422
             resp.media = 'Country must be a two-letter ISO code, e.g. CA.'
+            return
+        if cc not in country_info:
+            # unknown code: answer without spending a database scan on it
+            resp.status = falcon.HTTP_404
+            resp.media = f'Unknown country code {cc}.'
             return
         self.respond(req, resp, 'country', cc, f'country {cc}')
 
@@ -239,8 +268,6 @@ app.add_route('/', MyGeoLookup())
 app.add_route('/raw', MyRawLookup())
 app.add_route('/cidr/country/{country}', CountryCIDR())
 app.add_route('/cidr/asn/{asn}', ASNCIDR())
-
-threading.Thread(target=CIDRExport.build_index, daemon=True).start()
 
 
 def main():
