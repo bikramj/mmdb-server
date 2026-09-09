@@ -164,3 +164,26 @@ The output format is an array of JSON object (to support the ability to serve mu
     You should have received a copy of the GNU Affero General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ```
+
+## CIDR export endpoints (fork feature)
+
+Exports the loaded database as collapsed CIDR lists — e.g. to generate
+geo/network ACLs from the same data that answers lookups.
+
+~~~
+GET /cidr/country/{cc}     e.g. /cidr/country/CA
+GET /cidr/asn/{asn}        e.g. /cidr/asn/AS577 (or /cidr/asn/577)
+~~~
+
+Formats via `?format=`:
+
+- `plain` (default): one CIDR per line with a `#` header — directly usable
+  as an HAProxy acl file (`acl is_ca src -f ca.lst`)
+- `apache`: `Require ip <cidr>` lines for an Apache `<RequireAny>` include
+- `json`: `{query, count, source, cidrs[]}`
+
+The index builds in a background thread at startup (requires
+`maxminddb >= 2.5`); `/cidr` answers `503 Retry-After` until ready, and the
+lookup endpoints are never blocked. IPv4 and IPv6 are both included;
+adjacent prefixes are collapsed. Consumers fetching ACL files should
+sanity-check the result (e.g. minimum line count) before deploying it.
