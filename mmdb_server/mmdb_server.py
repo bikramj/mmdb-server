@@ -4,7 +4,7 @@
 #
 # The server is released under the AGPL version 3 or later.
 #
-# Copyright (C) 2022 Alexandre Dulaunoy
+# Copyright (C) 2022-2025 Alexandre Dulaunoy
 
 import configparser
 import time
@@ -110,11 +110,20 @@ class MyGeoLookup:
         ips = req.access_route
         resp.media = _process_lookup(ips[0])
 
+class MyRawLookup:
+    def on_get(self, req, resp):
+        ips = req.access_route
+        resp.text = ips[0]
+        return
+    def on_head(self, req, resp):
+        ips = req.access_route
+        resp.append_header('X-IP', ips[0])
 
 app = falcon.App()
 
 app.add_route('/geolookup/{value}', GeoLookup())
 app.add_route('/', MyGeoLookup())
+app.add_route('/raw', MyRawLookup())
 
 
 def main():

@@ -6,6 +6,8 @@ mmdb-server includes a free and open [GeoOpen-Country database](https://data.pub
 
 # Installation
 
+## Classic
+
 Python 3.10+ is required to run the mmdb-server with poetry.
 
 - `curl -sSL https://install.python-poetry.org | python3 -`
@@ -14,6 +16,11 @@ Python 3.10+ is required to run the mmdb-server with poetry.
 - `cp ./etc/server.conf.sample ./etc/server.conf`
 - `cd  ./db; bash update.sh; cd ..` (to get the latest version of the GeoOpen database)
 - `poetry run serve`
+
+## Docker
+
+- `docker build -t mmdb-server:latest .`
+- `docker run -d -p 8000:8000 --name mmdb-server mmdb-server:latest`
 
 # Usage
 
@@ -135,10 +142,14 @@ The output format is an array of JSON object (to support the ability to serve mu
 - [https://ipv4.circl.lu](https://ipv4.circl.lu/) If you are dual-homed IPv6/IPv4, return your IPv4 address. 
 - [https://ipv6.circl.lu](https://ipv6.circl.lu/) If you are dual-homed IPv6/IPv4, return your IPv6 address. 
 
+## If you want the source raw IP without any geolookup details
+
+- [https://ip.circl.lu/raw](https://ip.circl.lu/raw)
+
 # License
 
 ```
-    Copyright (C) 2022-2024 Alexandre Dulaunoy
+    Copyright (C) 2022-2025 Alexandre Dulaunoy
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published by
