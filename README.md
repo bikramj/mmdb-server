@@ -282,11 +282,9 @@ curl -s --retry 10 --retry-delay 5 http://127.0.0.1:8000/cidr/country/CA
 ~~~
 
 ~~~
-# country CA - 9532 ranges - GeoOpen-Country-ASN (build 2025-12-03 04:21:34)
+# country CA - 8174 IPv4 ranges - GeoOpen-Country-ASN (build 2025-12-03 04:21:34)
 2.22.72.0/22
 5.44.16.0/20
-...
-2001:410::/32
 ...
 ~~~
 
@@ -295,15 +293,27 @@ database is scanned in the background (a few seconds); `curl --retry` honours
 that header and returns the real answer. Later requests for the same key are
 served from cache until the server restarts.
 
-The same list in the other formats:
+IPv4 only by default. `?family=6` gives the IPv6 prefixes and `?family=all`
+both; the family is applied when the response is built, so switching is free
+once the key is cached:
+
+~~~bash
+curl -s "http://127.0.0.1:8000/cidr/country/CA?family=6"
+# country CA - 1358 IPv6 ranges - GeoOpen-Country-ASN (build 2025-12-03 04:21:34)
+# 2001:410::/32
+# ...
+curl -s "http://127.0.0.1:8000/cidr/country/CA?family=all"
+~~~
+
+The same list in the other formats (`family` combines with `format`):
 
 ~~~bash
 # Apache: one "Require ip" line per network
 curl -s --retry 10 --retry-delay 5 "http://127.0.0.1:8000/cidr/country/CA?format=apache"
 
-# JSON: {query, count, source, cidrs[]}
-curl -s --retry 10 --retry-delay 5 "http://127.0.0.1:8000/cidr/country/CA?format=json" \
-  | jq '{count, source, first: .cidrs[0]}'
+# JSON: {query, family, count, source, cidrs[]}
+curl -s --retry 10 --retry-delay 5 "http://127.0.0.1:8000/cidr/country/CA?format=json&family=all" \
+  | jq '{family, count, source, first: .cidrs[0]}'
 ~~~
 
 Country codes are case-insensitive (`/cidr/country/ca`). A code that is not
@@ -317,17 +327,15 @@ curl -s --retry 10 --retry-delay 5 http://127.0.0.1:8000/cidr/asn/AS239   # or /
 ~~~
 
 ~~~
-# AS239 - 10 ranges - GeoOpen-Country-ASN (build 2025-12-03 04:21:34)
+# AS239 - 8 IPv4 ranges - GeoOpen-Country-ASN (build 2025-12-03 04:21:34)
 128.100.0.0/16
 138.51.0.0/16
 142.1.0.0/16
 ...
-2606:fa00::/32
-...
 ~~~
 
-`?format=apache` and `?format=json` work here too. A non-numeric ASN is a
-`422`; an ASN with no networks is a `404` (after the scan).
+`?family=` and `?format=` work here too. A non-numeric ASN is a `422`; an
+ASN with no networks in the requested family is a `404` (after the scan).
 
 ### Feeding an HAProxy ACL
 
@@ -336,6 +344,7 @@ curl -s --retry 10 --retry-delay 5 http://127.0.0.1:8000/cidr/asn/AS239   # or /
 # refresh-ca-list.sh — run from cron after the daily database refresh
 set -e
 new=$(mktemp)
+# IPv4 only by default; add ?family=all for a dual-stack frontend
 curl -sf --retry 10 --retry-delay 5 -o "$new" http://127.0.0.1:8000/cidr/country/CA
 # refuse a suspiciously short list and keep the last known-good file
 [ "$(grep -c / "$new")" -ge 5000 ] || { echo "CA list too short, keeping the old one"; exit 1; }
@@ -377,7 +386,7 @@ the database in a background thread (a few seconds; requires
 `maxminddb >= 2.5`) and answers `503 Retry-After` — retry, e.g.
 `curl --retry 10 --retry-delay 5 ...` — and the result is cached until the
 service restarts. Only the requested key's networks are kept, so memory
-stays flat and the lookup endpoints are never blocked. IPv4 and IPv6 are
-both included; adjacent prefixes are collapsed. Consumers fetching ACL
-files should sanity-check the result (e.g. minimum line count) before
-deploying it.
+stays flat and the lookup endpoints are never blocked. IPv4 is returned by
+default (`?family=6` for IPv6, `?family=all` for both); adjacent prefixes
+are collapsed. Consumers fetching ACL files should sanity-check the result
+(e.g. minimum line count) before deploying it.

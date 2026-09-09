@@ -132,7 +132,7 @@ class CIDRExport:
     lookup endpoints are never blocked.
     """
 
-    results = {}  # (kind, key) -> (cidrs, source); empty cidrs = no networks
+    results = {}  # (kind, key) -> (v4, v6, source); empty lists = no networks
     pending = set()
     lock = threading.Lock()
     scan_lock = threading.Lock()  # one scan at a time
@@ -178,7 +178,7 @@ class CIDRExport:
                 break
         v4 = collapse_addresses(n for n in networks if n.version == 4)
         v6 = collapse_addresses(n for n in networks if n.version == 6)
-        return [str(n) for n in v4] + [str(n) for n in v6], source
+        return [str(n) for n in v4], [str(n) for n in v6], source
 
     @classmethod
     def scan(cls, kind, key):
@@ -195,7 +195,7 @@ class CIDRExport:
 
     @classmethod
     def lookup(cls, kind, key):
-        """Cached (cidrs, source) for key, or None while its scan runs."""
+        """Cached (v4, v6, source) for key, or None while its scan runs."""
         with cls.lock:
             cached = cls.results.get((kind, key))
             if cached is None and (kind, key) not in cls.pending:
@@ -203,23 +203,33 @@ class CIDRExport:
                 threading.Thread(target=cls.scan, args=(kind, key), daemon=True).start()
             return cached
 
+    FAMILIES = {'4': 'IPv4', '6': 'IPv6', 'all': 'IPv4+IPv6'}
+
     def respond(self, req, resp, kind, key, label):
+        family = req.get_param('family', default='4').lower()
+        if family not in self.FAMILIES:
+            resp.status = falcon.HTTP_422
+            resp.media = 'family must be 4 (default), 6 or all.'
+            return
         found = self.lookup(kind, key)
         if found is None:
             resp.status = falcon.HTTP_503
             resp.append_header('Retry-After', '5')
             resp.media = f'Scanning the database for {label}, retry shortly.'
             return
-        cidrs, source = found
+        v4, v6, source = found
+        cidrs = {'4': v4, '6': v6, 'all': v4 + v6}[family]
+        family_label = self.FAMILIES[family]
         if not cidrs:
             resp.status = falcon.HTTP_404
-            resp.media = f'No networks found for {label}.'
+            resp.media = f'No {family_label} networks found for {label}.'
             return
         fmt = req.get_param('format', default='plain').lower()
-        header = f"# {label} - {len(cidrs)} ranges - {source}"
+        header = f"# {label} - {len(cidrs)} {family_label} ranges - {source}"
         if fmt == 'json':
             resp.media = {
                 'query': label,
+                'family': family_label,
                 'count': len(cidrs),
                 'source': source,
                 'cidrs': cidrs,
